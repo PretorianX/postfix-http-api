@@ -1,0 +1,108 @@
+name: Docker Publish & Release
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ghcr.io/pretorianx/postfix-http-api
+
+jobs:
+  publish-image:
+    name: Build & Push boky/postfix:v4.4.0 Image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=boky-v4.4.0,enable={{is_default_branch}}
+            type=raw,value=boky-v4.4.0-{{version}},enable={{is_semver}}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push multi-arch image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/boky/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  release-binaries:
+    name: Build & Attach Release Binaries
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs:
+      - publish-image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.4"
+          cache: true
+
+      - name: Build static Linux binaries
+        run: |
+          mkdir -p dist
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+            go build -trimpath -ldflags="-s -w" -o dist/postfix-api-linux-amd64 ./cmd/postfix-api
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
+            go build -trimpath -ldflags="-s -w" -o dist/postfix-api-linux-arm64 ./cmd/postfix-api
+          (cd dist && sha256sum postfix-api-linux-amd64 postfix-api-linux-arm64 > SHA256SUMS)
+
+      - name: Create GitHub Release and upload artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release upload "${TAG}" \
+              dist/postfix-api-linux-amd64 \
+              dist/postfix-api-linux-arm64 \
+              dist/SHA256SUMS \
+              --clobber
+          else
+            gh release create "${TAG}" \
+              dist/postfix-api-linux-amd64 \
+              dist/postfix-api-linux-arm64 \
+              dist/SHA256SUMS \
+              --title "${TAG}" \
+              --generate-notes
+          fi

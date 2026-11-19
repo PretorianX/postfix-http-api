@@ -1,0 +1,21 @@
+# Binaries
+/postfix-api
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+
+# Coverage
+coverage.txt
+*.coverprofile
+
+# Local state / DB
+*.db
+*.db-wal
+*.db-shm
+
+# IDE / OS
+.DS_Store
+.idea/
+.vscode/

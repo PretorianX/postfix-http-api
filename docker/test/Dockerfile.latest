@@ -1,0 +1,117 @@
+# syntax=docker/dockerfile:1.7
+
+FROM --platform=$BUILDPLATFORM golang:1.27.4 AS go-builder
+
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
+
+WORKDIR /src
+
+COPY go.mod go.sum* ./
+RUN go mod download
+
+COPY . .
+
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -trimpath -ldflags="-s -w" -o /out/postfix-api ./cmd/postfix-api
+
+FROM debian:bookworm-slim AS postfix-builder
+
+ARG POSTFIX_VERSION=3.11.7
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        curl \
+        libdb-dev \
+        libicu-dev \
+        libssl-dev \
+        m4 \
+        perl \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN groupadd -r postfix \
+    && groupadd -r postdrop \
+    && useradd -r -g postfix -d /var/spool/postfix -s /usr/sbin/nologin postfix
+
+WORKDIR /build
+
+RUN set -eu; \
+    for url in \
+        "https://cdn.postfix.johnriley.me/mirrors/postfix-release/official/postfix-${POSTFIX_VERSION}.tar.gz" \
+        "https://de.postfix.org/ftpmirror/official/postfix-${POSTFIX_VERSION}.tar.gz" \
+        "https://archive.mgm51.com/mirrors/postfix-source/official/postfix-${POSTFIX_VERSION}.tar.gz"; do \
+        if curl -fsSL --retry 3 --connect-timeout 15 -o "postfix-${POSTFIX_VERSION}.tar.gz" "${url}"; then \
+            break; \
+        fi; \
+    done; \
+    test -s "postfix-${POSTFIX_VERSION}.tar.gz"; \
+    tar -xzf "postfix-${POSTFIX_VERSION}.tar.gz"
+
+WORKDIR /build/postfix-${POSTFIX_VERSION}
+
+RUN make makefiles \
+        CCARGS='-DUSE_TLS -I/usr/include/openssl' \
+        AUXLIBS='-lssl -lcrypto' \
+        command_directory=/usr/sbin \
+        daemon_directory=/usr/libexec/postfix \
+        data_directory=/var/lib/postfix \
+        queue_directory=/var/spool/postfix \
+        config_directory=/etc/postfix \
+        mail_owner=postfix \
+        setgid_group=postdrop \
+        shlib_directory=no \
+    && make -j"$(nproc)" \
+    && make non-interactive-package install_root=/postfix-root \
+        command_directory=/usr/sbin \
+        daemon_directory=/usr/libexec/postfix \
+        data_directory=/var/lib/postfix \
+        queue_directory=/var/spool/postfix \
+        config_directory=/etc/postfix \
+        mail_owner=postfix \
+        setgid_group=postdrop \
+        shlib_directory=no
+
+FROM debian:bookworm-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        libdb5.3 \
+        libicu72 \
+        libssl3 \
+        netcat-openbsd \
+        procps \
+        python3 \
+        iproute2 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN groupadd -r postfix \
+    && groupadd -r postdrop \
+    && useradd -r -g postfix -d /var/spool/postfix -s /usr/sbin/nologin postfix
+
+COPY --from=postfix-builder /postfix-root/ /
+COPY --from=go-builder /out/postfix-api /usr/local/bin/postfix-api
+RUN chmod 0755 /usr/local/bin/postfix-api
+
+RUN touch /etc/aliases \
+    && postconf -e "myhostname = test-postfix-latest.localdomain" \
+    && postconf -e "mydestination = localhost" \
+    && postconf -e "inet_interfaces = all" \
+    && postconf -e "mynetworks = 127.0.0.0/8 [::1]/128 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16" \
+    && postconf -e "maillog_file = /dev/stdout" \
+    && postconf -e "alias_maps = hash:/etc/aliases" \
+    && postconf -e "alias_database = hash:/etc/aliases" \
+    && postconf -e "compatibility_level = 3.11" \
+    && postfix set-permissions \
+    && newaliases \
+    && postfix check
+
+EXPOSE 25 8025
+
+CMD ["postfix", "start-fg"]

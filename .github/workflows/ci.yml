@@ -1,0 +1,108 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  schedule:
+    # Weekly run to validate Postfix 3.11.7 source build and upstream base images
+    - cron: "0 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit-test:
+    name: Unit Tests & Vet
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.4"
+          cache: true
+
+      - name: Check formatting
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "${unformatted}" ]; then
+            echo "The following Go files are not formatted with gofmt:"
+            echo "${unformatted}"
+            exit 1
+          fi
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Run unit tests with race detector
+        run: go test -race -cover -count=1 ./...
+
+  build-binaries:
+    name: Build Static Linux Binaries
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.27.4"
+          cache: true
+
+      - name: Cross-compile static linux/amd64 and linux/arm64 binaries
+        run: |
+          mkdir -p dist
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+            go build -trimpath -ldflags="-s -w" -o dist/postfix-api-linux-amd64 ./cmd/postfix-api
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 \
+            go build -trimpath -ldflags="-s -w" -o dist/postfix-api-linux-arm64 ./cmd/postfix-api
+
+      - name: Verify binaries are statically linked
+        run: |
+          set -euo pipefail
+          for bin in dist/postfix-api-linux-amd64 dist/postfix-api-linux-arm64; do
+            info="$(file "${bin}")"
+            echo "${info}"
+            echo "${info}" | grep -q "statically linked"
+          done
+          if ldd dist/postfix-api-linux-amd64 2>&1 | grep -Eq "=>|libc\.so|ld-linux"; then
+            echo "ERROR: postfix-api-linux-amd64 has dynamic library dependencies"
+            ldd dist/postfix-api-linux-amd64 || true
+            exit 1
+          fi
+
+  integration-test:
+    name: Integration (${{ matrix.target }})
+    needs:
+      - unit-test
+      - build-binaries
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - debian12
+          - alpine
+          - boky
+          - latest
+    # Keep PRs fast by running the Postfix 3.11.7 source-compile target on main, schedule, and manual runs
+    if: matrix.target != 'latest' || github.event_name != 'pull_request'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Run integration suite (${{ matrix.target }})
+        run: bash tests/integration/run_integration.sh "${{ matrix.target }}"

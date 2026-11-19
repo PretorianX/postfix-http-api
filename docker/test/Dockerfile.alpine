@@ -1,0 +1,43 @@
+# syntax=docker/dockerfile:1.7
+
+FROM --platform=$BUILDPLATFORM golang:1.27.4 AS builder
+
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
+
+WORKDIR /src
+
+COPY go.mod go.sum* ./
+RUN go mod download
+
+COPY . .
+
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -trimpath -ldflags="-s -w" -o /out/postfix-api ./cmd/postfix-api
+
+FROM alpine:3.24
+
+RUN apk add --no-cache \
+        postfix \
+        ca-certificates \
+        curl \
+        python3 \
+        procps \
+        netcat-openbsd \
+        bash
+
+COPY --from=builder /out/postfix-api /usr/local/bin/postfix-api
+RUN chmod 0755 /usr/local/bin/postfix-api
+
+RUN postconf -e "myhostname = test-alpine.localdomain" \
+    && postconf -e "mydestination = localhost" \
+    && postconf -e "inet_interfaces = all" \
+    && postconf -e "mynetworks = 127.0.0.0/8 [::1]/128 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16" \
+    && postconf -e "maillog_file = /dev/stdout" \
+    && postconf -e "compatibility_level = 3.6" \
+    && postalias /etc/postfix/aliases \
+    && postfix check
+
+EXPOSE 25 8025
+
+CMD ["postfix", "start-fg"]

@@ -1,0 +1,64 @@
+# Drop-in replacement for boky/postfix:v4.4.0 (e.g. hide-mail workloads)
+# with embedded postfix-api HTTP observability and queue management.
+#
+# Quick start:
+#   1. Generate a token hash:
+#        docker run --rm ghcr.io/pretorianx/postfix-http-api:boky-v4.4.0 \
+#          postfix-api token new --name hide-mail --scopes read,write,content
+#   2. Set POSTFIXAPI_TOKEN_SHA256 below (or mount ./postfix-api.conf:ro).
+#   3. Run: docker compose -f docker/compose.example.yml up -d
+
+services:
+  postfix:
+    image: ghcr.io/pretorianx/postfix-http-api:boky-v4.4.0
+    # To build locally instead of pulling from GHCR:
+    # build:
+    #   context: ..
+    #   dockerfile: docker/boky/Dockerfile
+    container_name: postfix-http-api
+    restart: unless-stopped
+    ports:
+      - "587:587"
+      # Bind API to loopback or an internal network; enable TLS if exposing externally.
+      - "127.0.0.1:8025:8025"
+    environment:
+      # --- Standard boky/postfix:v4.4.0 environment variables (unchanged) ---
+      HOSTNAME: mail.example.com
+      RELAYHOST: "[smtp.relay.example.com]:587"
+      RELAYHOST_USERNAME: "relay-user"
+      RELAYHOST_PASSWORD: "relay-password"
+      ALLOWED_SENDER_DOMAINS: "example.com"
+      POSTFIX_message_size_limit: "26214400"
+      POSTFIX_maillog_file: "/dev/stdout"
+      DKIM_AUTOGENERATE: "false"
+      TZ: "UTC"
+
+      # --- postfix-api configuration (use POSTFIXAPI_* so boky's POSTFIX_* main.cf mapper ignores them) ---
+      POSTFIXAPI_LISTEN: "0.0.0.0:8025"
+      # Required when serving HTTP without TLS on non-loopback addresses (e.g. behind a TLS proxy/mesh):
+      POSTFIXAPI_ALLOW_PLAINTEXT: "true"
+      # Keep Subject header lines out of container stdout logs by default (PII protection):
+      POSTFIXAPI_SUBJECT_IN_OUTPUT: "false"
+      POSTFIXAPI_RETENTION_DURATION: "168h"
+
+      # Option A: Provide a pre-hashed SHA-256 token (recommended when not mounting postfix-api.conf):
+      POSTFIXAPI_TOKEN_NAME: "hide-mail"
+      POSTFIXAPI_TOKEN_SCOPES: "read,write,content"
+      POSTFIXAPI_TOKEN_SHA256: "replace-with-64-char-hex-sha256-from-postfix-api-token-new"
+      # Option B: Provide a raw token (hashed in-memory during init and unset before Postfix starts):
+      # POSTFIXAPI_TOKEN: "pfapi_..."
+      # Option C: Read raw token from a mounted Docker/Kubernetes secret file:
+      # POSTFIXAPI_TOKEN_FILE: "/run/secrets/postfix_api_token"
+    volumes:
+      # Persist Postfix queue and postfix-api SQLite state/spool across restarts:
+      - postfix_spool:/var/spool/postfix
+      - postfix_data:/var/lib/postfix
+      # Option D (highest precedence): mount a full YAML config file (chmod 0600 or 0400, root:root).
+      # When mounted, postfix-api.conf takes precedence over POSTFIXAPI_* token/config env vars.
+      # - ./postfix-api.conf:/etc/postfix/postfix-api.conf:ro
+      # Custom boky/postfix init hooks continue to work (99-postfix-api.sh runs last):
+      # - ./init-scripts/10-custom.sh:/docker-init.db/10-custom.sh:ro
+
+volumes:
+  postfix_spool:
+  postfix_data:
