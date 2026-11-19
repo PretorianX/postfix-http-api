@@ -53,8 +53,15 @@ func runFlood(args []string) error {
 	paceEvery := fs.Int("pace-every", 0, "sleep every N datagrams (0 disables)")
 	paceMs := fs.Int("pace-ms", 0, "sleep duration in milliseconds")
 	progressFile := fs.String("progress-file", "", "optional file updated with sent count")
+	pidFile := fs.String("pid-file", "", "optional file written with this process pid")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+
+	if *pidFile != "" {
+		if err := os.WriteFile(*pidFile, []byte(strconv.Itoa(os.Getpid())), 0o644); err != nil {
+			return fmt.Errorf("pid-file: %w", err)
+		}
 	}
 
 	fd, err := syscall.Socket(syscall.AF_UNIX, syscall.SOCK_DGRAM, 0)

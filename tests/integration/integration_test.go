@@ -23,6 +23,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/PretorianX/postfix-http-api/tests/integration/seqmark"
 )
 
 const (
@@ -35,7 +37,6 @@ const (
 
 var (
 	queuedAsRe = regexp.MustCompile(`queued as ([A-Za-z0-9]{6,32})`)
-	floodSeqRe = regexp.MustCompile(`FLOOD-SEQ-(\d{5})`)
 	stopSeqRe  = regexp.MustCompile(`STOP-BLOCK-(\d{5})`)
 )
 
@@ -1636,6 +1637,7 @@ func TestLogsReceiverForcedStopUnderFlood(t *testing.T) {
 
 	const totalRecords = 32000
 	progressFile := "/tmp/flood.progress"
+	pidFile := "/tmp/flood.pid"
 
 	type floodResult struct {
 		stdout string
@@ -1649,7 +1651,9 @@ func TestLogsReceiverForcedStopUnderFlood(t *testing.T) {
 		var err error
 		if tc.hasPython3 {
 			py := `import os, socket, sys, time
-sock_path, count, pace_every, pace_ms, prog_path = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), float(sys.argv[4]), sys.argv[5]
+sock_path, count, pace_every, pace_ms, prog_path, pid_path = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), float(sys.argv[4]), sys.argv[5], sys.argv[6]
+with open(pid_path, "w") as f:
+    f.write(str(os.getpid()))
 s = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
 s.connect(sock_path)
 for i in range(1, count + 1):
@@ -1673,7 +1677,7 @@ for i in range(1, count + 1):
         time.sleep(pace_ms / 1000.0)
 print(f"DONE {count}", flush=True)
 `
-			out, errOut, err = tc.exec("python3", "-c", py, sockPath, strconv.Itoa(totalRecords), "5", "1", progressFile)
+			out, errOut, err = tc.exec("python3", "-c", py, sockPath, strconv.Itoa(totalRecords), "5", "1", progressFile, pidFile)
 		} else {
 			out, errOut, err = tc.exec(
 				"/usr/local/bin/testhelper", "flood",
@@ -1684,12 +1688,36 @@ print(f"DONE {count}", flush=True)
 				"--pace-every", "5",
 				"--pace-ms", "1",
 				"--progress-file", progressFile,
+				"--pid-file", pidFile,
 			)
 		}
 		floodDone <- floodResult{stdout: out, stderr: errOut, err: err}
 	}()
 
+	// Wait until the flood writer has published its pid.
+	floodPID := 0
+	pidDeadline := time.Now().Add(10 * time.Second)
+	for {
+		raw, err := tc.readFile(pidFile)
+		if err == nil {
+			floodPID, _ = strconv.Atoi(strings.TrimSpace(raw))
+			if floodPID > 0 {
+				break
+			}
+		}
+		if time.Now().After(pidDeadline) {
+			t.Fatal("timed out waiting for flood writer pid file")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Cleanup(func() {
+		_, _, _ = tc.exec("kill", "-CONT", strconv.Itoa(floodPID))
+	})
+
 	// Send SIGKILL to the log receiver 3 separate times strictly mid-flood.
+	// Pause the flood writer first so the receiver can drain its socket and is
+	// blocked in Read — SIGKILL then cannot land on an in-flight datagram that
+	// has already been dequeued from the kernel queue.
 	curPID := recv.PID
 	killThresholds := []int{4000, 12000, 20000}
 	for idx, targetProgress := range killThresholds {
@@ -1713,15 +1741,19 @@ print(f"DONE {count}", flush=True)
 			t.Fatalf("round %d: flood completed (%d) before SIGKILL could fire mid-flood", round, progress)
 		}
 
-		// Re-verify live receiver PID and SIGKILL it.
+		tc.mustExec("kill", "-STOP", strconv.Itoa(floodPID))
+		time.Sleep(100 * time.Millisecond)
+
 		live := tc.waitProcByRole("receiver", 0, 5*time.Second)
 		curPID = live.PID
 		tc.mustExec("kill", "-KILL", strconv.Itoa(curPID))
 
 		// Master must respawn immediately (< 5s, no 60s service_throttle_time).
 		respawned := tc.waitProcByRole("receiver", curPID, 5*time.Second)
-		t.Logf("SIGKILL round %d at progress=%d: oldPID=%d -> newPID=%d", round, progress, curPID, respawned.PID)
+		t.Logf("SIGKILL round %d at progress=%d: oldPID=%d -> newPID=%d (flood paused)", round, progress, curPID, respawned.PID)
 		curPID = respawned.PID
+
+		tc.mustExec("kill", "-CONT", strconv.Itoa(floodPID))
 	}
 
 	res := <-floodDone
@@ -1733,32 +1765,17 @@ print(f"DONE {count}", flush=True)
 	}
 
 	// Poll container logs until all 32,000 flood markers are flushed to docker logs.
-	seen := make([]bool, totalRecords+1)
-	countSeen := 0
 	var logs string
 	logDeadline := time.Now().Add(30 * time.Second)
+	var countSeen int
+	var missing []int
 	for {
 		logs, _ = tc.logs()
-		matches := floodSeqRe.FindAllStringSubmatch(logs, -1)
-		seen = make([]bool, totalRecords+1)
-		countSeen = 0
-		for _, m := range matches {
-			n, _ := strconv.Atoi(m[1])
-			if n >= 1 && n <= totalRecords && !seen[n] {
-				seen[n] = true
-				countSeen++
-			}
-		}
+		countSeen, missing = seqmark.CountUnique(logs, "FLOOD-SEQ-", 5, totalRecords)
 		if countSeen == totalRecords {
 			break
 		}
 		if time.Now().After(logDeadline) {
-			var missing []int
-			for i := 1; i <= totalRecords && len(missing) < 20; i++ {
-				if !seen[i] {
-					missing = append(missing, i)
-				}
-			}
 			t.Fatalf("expected %d/%d flood records in container logs, got %d (sample missing: %v)",
 				totalRecords, totalRecords, countSeen, missing)
 		}
