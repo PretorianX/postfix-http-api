@@ -1,5 +1,11 @@
 # postfix-http-api
 
+[![CI & Tests](https://github.com/PretorianX/postfix-http-api/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/PretorianX/postfix-http-api/actions/workflows/ci.yml)
+[![Docker Build & Publish](https://github.com/PretorianX/postfix-http-api/actions/workflows/docker-publish.yml/badge.svg?branch=main)](https://github.com/PretorianX/postfix-http-api/actions/workflows/docker-publish.yml)
+[![Postfix](https://img.shields.io/badge/Postfix-3.5%20%E2%80%93%203.11-blue)](https://www.postfix.org/)
+[![Go](https://img.shields.io/badge/Go-1.27.4-00ADD8?logo=go&logoColor=white)](https://go.dev/)
+[![boky/postfix](https://img.shields.io/badge/boky%2Fpostfix-v4.4.0%20drop--in-2496ED?logo=docker&logoColor=white)](docker/boky/Dockerfile)
+
 **HTTP delivery-status tracking and queue management for Postfix — with zero external dependencies.**
 
 Postfix only shows mail that is *still waiting in the queue*. The moment a message is delivered or bounced, Postfix removes it and the only trace of what happened lives as unstructured text in the mail log.
