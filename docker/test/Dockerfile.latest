@@ -54,6 +54,7 @@ WORKDIR /build/postfix-${POSTFIX_VERSION}
 
 RUN make makefiles \
         shared=no \
+        manpage_directory=/usr/local/share/man \
         CCARGS='-DUSE_TLS -I/usr/include/openssl' \
         AUXLIBS='-lssl -lcrypto' \
         command_directory=/usr/sbin \
@@ -71,7 +72,8 @@ RUN make makefiles \
         queue_directory=/var/spool/postfix \
         config_directory=/etc/postfix \
         mail_owner=postfix \
-        setgid_group=postdrop
+        setgid_group=postdrop \
+        manpage_directory=/usr/local/share/man
 
 FROM debian:bookworm-slim
 
