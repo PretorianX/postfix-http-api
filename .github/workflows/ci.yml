@@ -90,13 +90,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        target:
-          - debian12
-          - alpine
-          - boky
-          - latest
-    # Keep PRs fast by running the Postfix 3.11.7 source-compile target on main, schedule, and manual runs
-    if: matrix.target != 'latest' || github.event_name != 'pull_request'
+        # Keep PRs fast by running the Postfix 3.11.7 source-compile target on main, schedule, and manual runs
+        target: ${{ github.event_name == 'pull_request' && fromJSON('["debian12","alpine","boky"]') || fromJSON('["debian12","alpine","boky","latest"]') }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
