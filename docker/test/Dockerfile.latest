@@ -53,6 +53,7 @@ RUN set -eu; \
 WORKDIR /build/postfix-${POSTFIX_VERSION}
 
 RUN make makefiles \
+        shared=no \
         CCARGS='-DUSE_TLS -I/usr/include/openssl' \
         AUXLIBS='-lssl -lcrypto' \
         command_directory=/usr/sbin \
@@ -62,7 +63,6 @@ RUN make makefiles \
         config_directory=/etc/postfix \
         mail_owner=postfix \
         setgid_group=postdrop \
-        shlib_directory=no \
     && make -j"$(nproc)" \
     && make non-interactive-package install_root=/postfix-root \
         command_directory=/usr/sbin \
@@ -71,8 +71,7 @@ RUN make makefiles \
         queue_directory=/var/spool/postfix \
         config_directory=/etc/postfix \
         mail_owner=postfix \
-        setgid_group=postdrop \
-        shlib_directory=no
+        setgid_group=postdrop
 
 FROM debian:bookworm-slim
 
